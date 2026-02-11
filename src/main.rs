@@ -11,7 +11,7 @@ const RADIO_MAP_PATH: &str = "radio_map.json";
 #[derive(Parser, Debug)]
 #[command(name = "wifi_distortion")]
 #[command(author = "vibe_cli")]
-#[command(version = "0.2.0")]
+#[command(version = "0.1.0")]
 #[command(about = "Wi-Fi Fingerprinting Map Builder for vibe_cli", long_about = None)]
 struct Args {
     #[command(subcommand)]

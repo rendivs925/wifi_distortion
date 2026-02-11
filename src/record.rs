@@ -1,7 +1,8 @@
 use indexmap::IndexMap;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
-use std::time::Duration;
+use std::io::Write;
+use std::time::{Duration, Instant};
 
 const INTERFACE_NAME: &str = "wlp3s0";
 const SAMPLE_DURATION_MS: u64 = 5000;
@@ -13,6 +14,7 @@ pub fn record_fingerprint(label: &str) -> Result<IndexMap<String, i8>, String> {
 
     let mut capture = pcap::Capture::from_device(INTERFACE_NAME)
         .map_err(|e| format!("Failed to open interface: {}", e))?
+        .timeout(100)
         .open()
         .map_err(|e| format!("Failed to open capture: {}", e))?;
 
@@ -20,21 +22,25 @@ pub fn record_fingerprint(label: &str) -> Result<IndexMap<String, i8>, String> {
     progress_bar.set_style(
         ProgressStyle::with_template("[{elapsed_precise}] {wide_bar} {percent}%")
             .unwrap()
-            .progress_chars("=> "),
+            .progress_chars("█▉▉"),
     );
 
     let mut bssid_readings: HashMap<String, Vec<i8>> = HashMap::new();
-    let start_time = std::time::Instant::now();
+    let start_time = Instant::now();
+    let mut packet_count = 0;
 
-    progress_bar.inc(1);
+    println!("[RECORD] Listening for packets...");
 
     loop {
-        if start_time.elapsed() >= Duration::from_millis(SAMPLE_DURATION_MS) {
+        let elapsed = start_time.elapsed().as_millis() as u64;
+
+        if elapsed >= SAMPLE_DURATION_MS {
             break;
         }
 
         match capture.next_packet() {
             Ok(packet) => {
+                packet_count += 1;
                 if let Some((bssid, rssi)) = super::utils::extract_rssi_from_radiotap(&packet.data)
                 {
                     bssid_readings
@@ -43,15 +49,19 @@ pub fn record_fingerprint(label: &str) -> Result<IndexMap<String, i8>, String> {
                         .push(rssi);
                 }
             }
-            Err(_) => continue,
+            Err(_) => {}
         }
 
-        let elapsed = start_time.elapsed().as_millis() as u64;
-        progress_bar.set_position(elapsed.min(SAMPLE_DURATION_MS));
-        std::thread::sleep(Duration::from_millis(50));
+        progress_bar.set_position(elapsed);
     }
 
-    progress_bar.finish_with_message("Sampling complete!");
+    progress_bar.finish_with_message("done!");
+
+    println!(
+        "[RECORD] Captured {} packets, {} unique BSSIDs",
+        packet_count,
+        bssid_readings.len()
+    );
 
     if bssid_readings.is_empty() {
         return Err("No packets captured. Check interface and permissions.".to_string());
@@ -70,7 +80,7 @@ pub fn record_fingerprint(label: &str) -> Result<IndexMap<String, i8>, String> {
     let top_signals: IndexMap<String, i8> = averaged_signals.into_iter().take(TOP_N).collect();
 
     let count = top_signals.len();
-    println!("[RECORD] Captured {} unique BSSIDs", count);
+    println!("[RECORD] Kept top {} BSSIDs", count);
 
     Ok(top_signals)
 }
