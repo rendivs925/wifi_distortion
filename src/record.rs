@@ -13,9 +13,20 @@ pub fn record_fingerprint(label: &str) -> Result<IndexMap<String, i8>, String> {
 
     let mut capture = pcap::Capture::from_device(INTERFACE_NAME)
         .map_err(|e| format!("Failed to open interface: {}", e))?
+        .promisc(true)
+        .rfmon(true)
+        .immediate_mode(true)
         .timeout(100)
         .open()
         .map_err(|e| format!("Failed to open capture: {}", e))?;
+
+    if capture.get_datalink() != pcap::Linktype(127) {
+        return Err(format!(
+            "Interface '{}' is not in radiotap mode (datalink: {:?}). Enable monitor mode and retry.",
+            INTERFACE_NAME,
+            capture.get_datalink()
+        ));
+    }
 
     let progress_bar = ProgressBar::new(SAMPLE_DURATION_MS);
     progress_bar.set_style(
@@ -63,13 +74,20 @@ pub fn record_fingerprint(label: &str) -> Result<IndexMap<String, i8>, String> {
     );
 
     if bssid_readings.is_empty() {
+        if packet_count > 0 {
+            return Err(
+                "Captured packets but no usable Wi-Fi frames with RSSI/BSSID. Ensure monitor mode is enabled on the interface."
+                    .to_string(),
+            );
+        }
         return Err("No packets captured. Check interface and permissions.".to_string());
     }
 
     let mut averaged_signals: Vec<(String, i8)> = bssid_readings
         .into_iter()
         .map(|(bssid, readings)| {
-            let avg_rssi = readings.iter().sum::<i8>() / readings.len() as i8;
+            let sum: i32 = readings.iter().map(|&v| v as i32).sum();
+            let avg_rssi = (sum / readings.len() as i32) as i8;
             (bssid, avg_rssi)
         })
         .collect();

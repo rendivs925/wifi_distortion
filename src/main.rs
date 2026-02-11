@@ -5,7 +5,6 @@ mod utils;
 
 use clap::{Parser, Subcommand};
 
-const INTERFACE_NAME: &str = "wlp3s0";
 const RADIO_MAP_PATH: &str = "radio_map.json";
 
 #[derive(Parser, Debug)]

@@ -15,7 +15,7 @@ pub fn extract_rssi_from_radiotap(packet: &[u8]) -> Option<(String, i8)> {
         None => return None,
     };
 
-    if rssi > 0 || rssi < -100 {
+    if !(-127..=0).contains(&rssi) {
         return None;
     }
 
@@ -27,25 +27,34 @@ pub fn extract_rssi_from_radiotap(packet: &[u8]) -> Option<(String, i8)> {
 
     let frame_control = u16::from_le_bytes([packet[frame_start], packet[frame_start + 1]]);
     let frame_type = (frame_control >> 2) & 0x3;
+    let to_ds = ((frame_control >> 8) & 0x1) == 1;
+    let from_ds = ((frame_control >> 9) & 0x1) == 1;
 
-    let bssid_offset = match frame_type {
-        0 => frame_start + 16,
-        2 => frame_start + 4,
-        _ => frame_start + 4,
+    let bssid_offset = match (frame_type, to_ds, from_ds) {
+        // Management frames always carry BSSID in Address 3.
+        (0, _, _) => frame_start + 16,
+        // Data frames: BSSID address position depends on DS direction bits.
+        (2, false, false) => frame_start + 16, // Address 3
+        (2, true, false) => frame_start + 4,   // Address 1
+        (2, false, true) => frame_start + 10,  // Address 2
+        // WDS (ToDS=FromDS=1) has four-address format; no direct BSSID field.
+        (2, true, true) => return None,
+        // Control/other frame types do not expose a stable BSSID.
+        _ => return None,
     };
 
     if packet.len() < bssid_offset + 6 {
         return None;
     }
 
+    let bssid_bytes = &packet[bssid_offset..bssid_offset + 6];
+    if bssid_bytes.iter().all(|&b| b == 0) {
+        return None;
+    }
+
     let bssid = format!(
         "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-        packet[bssid_offset],
-        packet[bssid_offset + 1],
-        packet[bssid_offset + 2],
-        packet[bssid_offset + 3],
-        packet[bssid_offset + 4],
-        packet[bssid_offset + 5]
+        bssid_bytes[0], bssid_bytes[1], bssid_bytes[2], bssid_bytes[3], bssid_bytes[4], bssid_bytes[5]
     );
 
     Some((bssid, rssi))
