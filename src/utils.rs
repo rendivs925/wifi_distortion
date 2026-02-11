@@ -5,52 +5,33 @@ pub fn extract_rssi_from_radiotap(packet: &[u8]) -> Option<(String, i8)> {
         return None;
     }
 
-    let radiotap_len = u16::from_le_bytes([packet[2], packet[3]]) as usize;
-    if packet.len() < radiotap_len + 24 {
+    let radiotap = match radiotap::Radiotap::from_bytes(packet) {
+        Ok(r) => r,
+        Err(_) => return None,
+    };
+
+    let rssi = match radiotap.antenna_signal {
+        Some(signal) => signal.value,
+        None => return None,
+    };
+
+    if rssi > 0 || rssi < -100 {
         return None;
     }
 
-    let mut rssi: Option<i8> = None;
-    let mut offset = 8;
+    let frame_start = radiotap.header.length as usize;
 
-    while offset + 1 < radiotap_len && offset + 1 < packet.len() {
-        let itype = packet[offset];
-        let ilen = packet[offset + 1] as usize;
-
-        if offset + 2 + ilen > radiotap_len {
-            break;
-        }
-
-        if itype == 0 && ilen >= 1 {
-            if offset + 2 < packet.len() {
-                rssi = Some(packet[offset + 2] as i8);
-            }
-        }
-
-        offset += 2 + ilen;
-    }
-
-    let rssi_val = rssi?;
-    if rssi_val > 0 || rssi_val < -100 {
+    if packet.len() < frame_start + 24 {
         return None;
     }
 
-    let frame_control = u16::from_le_bytes([packet[radiotap_len], packet[radiotap_len + 1]]);
-
+    let frame_control = u16::from_le_bytes([packet[frame_start], packet[frame_start + 1]]);
     let frame_type = (frame_control >> 2) & 0x3;
-    let frame_subtype = (frame_control >> 4) & 0xF;
 
-    let bssid_offset = if frame_type == 0 {
-        match frame_subtype {
-            0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 => {
-                radiotap_len + 16
-            }
-            _ => radiotap_len + 4,
-        }
-    } else if frame_type == 2 {
-        radiotap_len + 4
-    } else {
-        radiotap_len + 4
+    let bssid_offset = match frame_type {
+        0 => frame_start + 16,
+        2 => frame_start + 4,
+        _ => frame_start + 4,
     };
 
     if packet.len() < bssid_offset + 6 {
@@ -67,7 +48,7 @@ pub fn extract_rssi_from_radiotap(packet: &[u8]) -> Option<(String, i8)> {
         packet[bssid_offset + 5]
     );
 
-    Some((bssid, rssi_val))
+    Some((bssid, rssi))
 }
 
 pub fn extract_top10_features(signals: &IndexMap<String, i8>) -> Vec<f64> {
