@@ -1,8 +1,7 @@
 use indexmap::IndexMap;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::collections::HashMap;
-use std::io::Write;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const INTERFACE_NAME: &str = "wlp3s0";
 const SAMPLE_DURATION_MS: u64 = 5000;
