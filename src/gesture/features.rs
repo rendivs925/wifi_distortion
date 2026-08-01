@@ -124,6 +124,15 @@ pub fn features_for_stream(values: &[f64], fft_bins: usize) -> Vec<f64> {
     feats
 }
 
+/// Features for one AP stream, with an explicit presence bit appended last.
+/// This distinguishes "AP seen but weak/flat" from "AP not in this window at
+/// all" — a vanished AP no longer collapses to z-scored zeros.
+pub fn features_for_stream_present(values: &[f64], present: bool) -> Vec<f64> {
+    let mut feats = features_for_stream(values, 4);
+    feats.push(if present { 1.0 } else { 0.0 });
+    feats
+}
+
 /// Z-score normalize a feature matrix in place using the provided mean/std.
 /// Each row is one sample; each column is one feature.
 pub fn zscore_inplace(rows: &mut [Vec<f64>], means: &[f64], stds: &[f64]) {
@@ -239,6 +248,15 @@ mod tests {
         assert_eq!(a.len(), b.len());
         assert_eq!(a.len(), c.len());
         assert_eq!(a.len(), 13); // 9 time + 4 fft
+    }
+
+    #[test]
+    fn presence_bit_distinguishes_missing_ap() {
+        let present = features_for_stream_present(&[-50.0, -52.0, -48.0], true);
+        let missing = features_for_stream_present(&[], false);
+        assert_eq!(present.len(), missing.len());
+        assert!((present[present.len() - 1] - 1.0).abs() < 1e-9);
+        assert!(missing[missing.len() - 1].abs() < 1e-9);
     }
 
     #[test]

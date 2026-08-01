@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use crossbeam_channel::Sender;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 pub struct Sample {
     pub ts_us: u64,
@@ -14,6 +14,12 @@ pub struct Sample {
 
 pub fn spawn_reader(port: &str, baud: u32, tx: Sender<Sample>) -> Result<()> {
     info!("opening serial port {} @ {}", port, baud);
+    if baud != 115_200 {
+        warn!(
+            "baud {} != firmware baud 115200 — the stream will garble; set SERIAL_BAUD=115200",
+            baud
+        );
+    }
     let serial = serialport::new(port, baud)
         .timeout(Duration::from_millis(100))
         .open()

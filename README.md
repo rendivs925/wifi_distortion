@@ -31,12 +31,12 @@ wifi_distortion clear
 ESP32 (firmware, Rust no_std)          Laptop (wifi_distortion host bridge)
 ┌─────────────────────────────┐ USB   ┌─────────────────────────────────────────────┐
 │ promiscuous Sniffer         │ ────► │ serial → time-window buffer → per-AP        │
-│ rx_cntl.rssi + timestamp    │ UART  │ features (9 TD + 4 FFT) → z-score →         │
-│ filter rx_state != 0        │       │ RandomForest/KNN → margin gate → xdotool   │
+│ rx_cntl.rssi + timestamp    │ UART  │ features (9 TD + 4 FFT + presence) → z-score│
+│ filter rx_state != 0        │       │ → RandomForest/KNN → margin gate → xdotool │
 └─────────────────────────────┘       └─────────────────────────────────────────────┘
 ```
 
-Firmware prints `timestamp_us,MAC,RSSI` lines at 115200 baud.
+Firmware prints `timestamp_us,MAC,RSSI` lines at 115200 baud (do not change `SERIAL_BAUD` on the host, or the stream garbles).
 
 ### 1. Flash the ESP32 firmware
 
@@ -58,6 +58,8 @@ cargo run --release   # or: cargo build --release && espflash flash target/xtens
 sudo usermod -aG dialout $USER
 
 # record ~3s of each gesture (repeat several times for good coverage)
+# START THE GESTURE AS SOON AS THE PROMPT APPEARS — the recorder flushes
+# stale data for ~300ms, then labels every captured window as the gesture.
 wifi_distortion gesture-record still --seconds 3
 wifi_distortion gesture-record swipe-up --seconds 3
 wifi_distortion gesture-record swipe-down --seconds 3

@@ -26,6 +26,13 @@ pub fn record(label: &str, seconds: u64) -> Result<()> {
 
     info!("recording '{}' for {}s — perform the gesture now", label, seconds);
 
+    // Drain any stale samples from a previous session so they don't skew t0.
+    let flush_start = Instant::now();
+    while flush_start.elapsed() < Duration::from_millis(300) {
+        while rx.try_recv().is_ok() {}
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
     let start = Instant::now();
     let deadline = Duration::from_secs(seconds);
     let mut by_ap: HashMap<String, Vec<(u64, f64)>> = HashMap::new();
@@ -165,7 +172,7 @@ pub fn train() -> Result<()> {
         seen
     };
 
-    let feature_dim = features::features_for_stream(&[0.0], 4).len() * ap_order.len();
+    let feature_dim = features::features_for_stream_present(&[], true).len() * ap_order.len();
 
     for w in &windows {
         let label_idx = *label_map.get(&w.label).context("missing label mapping")?;
@@ -174,9 +181,9 @@ pub fn train() -> Result<()> {
         let mut stream_features: Vec<f64> = Vec::with_capacity(feature_dim);
         for mac in &ap_order {
             if let Some(v) = w.streams.get(mac) {
-                stream_features.extend(features::features_for_stream(v, 4));
+                stream_features.extend(features::features_for_stream_present(v, true));
             } else {
-                stream_features.extend(features::features_for_stream(&[], 4));
+                stream_features.extend(features::features_for_stream_present(&[], false));
             }
         }
         rows.push(stream_features);
@@ -227,9 +234,9 @@ pub fn run() -> Result<()> {
                 let mut feat = Vec::with_capacity(model.feature_dim);
                 for mac in &model.ap_order {
                     if let Some(v) = by_ap.get(mac) {
-                        feat.extend(features::features_for_stream(v, 4));
+                        feat.extend(features::features_for_stream_present(v, true));
                     } else {
-                        feat.extend(features::features_for_stream(&[], 4));
+                        feat.extend(features::features_for_stream_present(&[], false));
                     }
                 }
 
