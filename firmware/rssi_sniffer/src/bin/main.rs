@@ -87,6 +87,15 @@ fn on_sniff(pkt: PromiscuousPkt<'_>) {
         return;
     }
 
+    // Only management (00) and data (10) frames carry a usable addr2 (transmitter).
+    // Control frames (01: ACK/CTS/RTS) have no addr2 at offset 10 and would
+    // produce garbage MACs that pollute the dataset.
+    let fc = u16::from_le_bytes([pkt.data[0], pkt.data[1]]);
+    let frame_type = (fc >> 2) & 0x3;
+    if frame_type != 0 && frame_type != 2 {
+        return;
+    }
+
     let mac: [u8; 6] = pkt.data[10..16].try_into().unwrap(); // addr2 = transmitter
     let ts_us = pkt.rx_cntl.timestamp.duration_since_epoch().as_micros();
     let sample = Sample {

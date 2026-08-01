@@ -16,6 +16,8 @@ use self::config::GestureConfig;
 use self::serial::Sample;
 
 /// Record N seconds of raw samples for a gesture label.
+/// The captured stream is segmented into `WINDOW_MS` windows, so each
+/// recorded burst produces multiple training windows matching inference length.
 pub fn record(label: &str, seconds: u64) -> Result<()> {
     let cfg = GestureConfig::default();
     let (tx, rx) = crossbeam_channel::unbounded::<Sample>();
@@ -26,16 +28,20 @@ pub fn record(label: &str, seconds: u64) -> Result<()> {
 
     let start = Instant::now();
     let deadline = Duration::from_secs(seconds);
-    let mut by_ap: HashMap<String, Vec<f64>> = HashMap::new();
+    let mut by_ap: HashMap<String, Vec<(u64, f64)>> = HashMap::new();
 
     while start.elapsed() < deadline {
         let remaining = (deadline - start.elapsed()).as_secs();
-        eprint!("\r[{:>3}s left] samples: {:>6}      ", remaining, total_samples(&by_ap));
+        eprint!(
+            "\r[{:>3}s left] samples: {:>6}      ",
+            remaining,
+            total_samples(&by_ap)
+        );
         while let Ok(s) = rx.try_recv() {
             by_ap
                 .entry(s.mac)
                 .or_default()
-                .push(s.rssi as f64);
+                .push((s.ts_us, s.rssi as f64));
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -48,16 +54,70 @@ pub fn record(label: &str, seconds: u64) -> Result<()> {
         ));
     }
 
-    let window = dataset::LabeledWindow {
-        label: label.to_string(),
-        streams: by_ap,
-    };
-    dataset::append_window(&window)?;
-    info!("appended one window for '{}'", label);
+    let windows = segment_windows(by_ap, cfg.window_ms);
+    if windows.is_empty() {
+        return Err(anyhow::anyhow!(
+            "captured samples but no full {}-ms window completed",
+            cfg.window_ms
+        ));
+    }
+
+    for win in windows.iter() {
+        let w = dataset::LabeledWindow {
+            label: label.to_string(),
+            streams: win.clone(),
+        };
+        dataset::append_window(&w)?;
+    }
+    info!(
+        "appended {} windows for '{}' ({} ms each)",
+        windows.len(),
+        label,
+        cfg.window_ms
+    );
     Ok(())
 }
 
-fn total_samples(by_ap: &HashMap<String, Vec<f64>>) -> usize {
+/// Segment per-AP (ts, rssi) streams into fixed-duration windows.
+fn segment_windows(
+    by_ap: HashMap<String, Vec<(u64, f64)>>,
+    window_ms: u64,
+) -> Vec<HashMap<String, Vec<f64>>> {
+    let win_us = window_ms * 1000;
+    // Determine the time range spanned by the samples.
+    let mut t0 = u64::MAX;
+    let mut t1 = 0u64;
+    for v in by_ap.values() {
+        for &(ts, _) in v.iter() {
+            t0 = t0.min(ts);
+            t1 = t1.max(ts);
+        }
+    }
+    if t0 == u64::MAX || t1 - t0 < win_us {
+        return Vec::new();
+    }
+
+    let n_windows = ((t1 - t0) / win_us) as usize;
+    let mut out: Vec<HashMap<String, Vec<f64>>> = vec![HashMap::new(); n_windows];
+
+    for (mac, samples) in &by_ap {
+        for &(ts, rssi) in samples {
+            if ts < t0 {
+                continue;
+            }
+            let idx = ((ts - t0) / win_us) as usize;
+            if idx < n_windows {
+                out[idx].entry(mac.clone()).or_default().push(rssi);
+            }
+        }
+    }
+
+    // Drop empty windows (start/end partials).
+    out.retain(|w| !w.is_empty());
+    out
+}
+
+fn total_samples(by_ap: &HashMap<String, Vec<(u64, f64)>>) -> usize {
     by_ap.values().map(|v| v.len()).sum()
 }
 
@@ -101,30 +161,29 @@ pub fn train() -> Result<()> {
             }
         }
         seen.sort_by(|a, b| counts.get(b).unwrap_or(&0).cmp(counts.get(a).unwrap_or(&0)));
+        seen.truncate(config::GestureConfig::default().ap_count);
         seen
     };
 
-    let feature_dim = features::features_for_stream(&[0.0], 4).len() * config::GestureConfig::default().ap_count;
+    let feature_dim = features::features_for_stream(&[0.0], 4).len() * ap_order.len();
 
     for w in &windows {
         let label_idx = *label_map.get(&w.label).context("missing label mapping")?;
 
-        // Build exactly `ap_count` stream feature blocks (pad missing APs).
+        // Build exactly `ap_order.len()` stream feature blocks (pad missing APs).
         let mut stream_features: Vec<f64> = Vec::with_capacity(feature_dim);
-        for i in 0..config::GestureConfig::default().ap_count {
-            if let Some(mac) = ap_order.get(i) {
-                if let Some(v) = w.streams.get(mac) {
-                    stream_features.extend(features::features_for_stream(v, 4));
-                    continue;
-                }
+        for mac in &ap_order {
+            if let Some(v) = w.streams.get(mac) {
+                stream_features.extend(features::features_for_stream(v, 4));
+            } else {
+                stream_features.extend(features::features_for_stream(&[], 4));
             }
-            stream_features.extend(features::features_for_stream(&[], 4));
         }
         rows.push(stream_features);
         y.push(label_idx);
     }
 
-    let model = model::train(&rows, &y, &labels)?;
+    let model = model::train(&rows, &y, &labels, &ap_order)?;
     model::TrainedModel::save(&model, model::MODEL_PATH)?;
     info!("saved model to {}", model::MODEL_PATH);
     Ok(())
@@ -162,21 +221,24 @@ pub fn run() -> Result<()> {
         while let Ok(s) = rx.try_recv() {
             if let Some(raw) = win.push(s) {
                 let by_ap = buffer::WindowBuffer::to_f64_map(&raw);
-                let top = features::top_aps(&by_ap, cfg.ap_count);
 
+                // Build features using the model's fixed AP order so feature
+                // positions match training exactly.
                 let mut feat = Vec::with_capacity(model.feature_dim);
-                for i in 0..cfg.ap_count {
-                    if let Some(mac) = top.get(i) {
-                        if let Some(v) = by_ap.get(mac) {
-                            feat.extend(features::features_for_stream(v, 4));
-                            continue;
-                        }
+                for mac in &model.ap_order {
+                    if let Some(v) = by_ap.get(mac) {
+                        feat.extend(features::features_for_stream(v, 4));
+                    } else {
+                        feat.extend(features::features_for_stream(&[], 4));
                     }
-                    feat.extend(features::features_for_stream(&[], 4));
                 }
 
                 if feat.len() != model.feature_dim {
-                    warn!("window feature dim {} != model {} — skipping", feat.len(), model.feature_dim);
+                    warn!(
+                        "window feature dim {} != model {} — skipping",
+                        feat.len(),
+                        model.feature_dim
+                    );
                     continue;
                 }
 
@@ -198,6 +260,7 @@ pub fn run() -> Result<()> {
                                 Ok(()) => {
                                     info!("EMIT {} -> key {}", label, key);
                                     last_emit = now;
+                                    pending.clear(); // reset debounce after a real emit
                                 }
                                 Err(e) => warn!("key emission failed: {}", e),
                             }
@@ -285,5 +348,35 @@ mod tests {
             Some(("b".to_string(), 0.9)),
         ];
         assert_eq!(decide(&p, &labels, 0.2), None);
+    }
+
+    #[test]
+    fn segment_windows_splits_by_duration() {
+        // 2 APs, samples spanning 3.5 windows of 1000ms each.
+        let mut by_ap: HashMap<String, Vec<(u64, f64)>> = HashMap::new();
+        by_ap.insert(
+            "A".into(),
+            (0..4000).step_by(1000).map(|ts| (ts as u64 * 1000, -50.0)).collect(),
+        );
+        by_ap.insert(
+            "B".into(),
+            (0..4000).step_by(1000).map(|ts| (ts as u64 * 1000, -60.0)).collect(),
+        );
+
+        let wins = segment_windows(by_ap, 1000);
+        // t0=0, t1=3_000_000 -> 3 full windows
+        assert_eq!(wins.len(), 3);
+        for w in &wins {
+            assert_eq!(w.len(), 2); // both APs present
+            assert_eq!(w["A"].len(), 1); // one sample per AP per window
+        }
+    }
+
+    #[test]
+    fn segment_windows_drops_partial_edges() {
+        let mut by_ap: HashMap<String, Vec<(u64, f64)>> = HashMap::new();
+        by_ap.insert("A".into(), vec![(0, -50.0), (500_000, -51.0)]);
+        let wins = segment_windows(by_ap, 1000);
+        assert_eq!(wins.len(), 0); // total span < 1 window
     }
 }

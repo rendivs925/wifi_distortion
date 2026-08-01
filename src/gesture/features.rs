@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use rustfft::{FftPlanner, num_complex::Complex};
 
 /// Compute 9 time-domain features from a slice of RSSI samples.
@@ -144,13 +142,6 @@ pub fn fit_zscore(rows: &[Vec<f64>]) -> (Vec<f64>, Vec<f64>) {
     }
 
     (means, stds)
-}
-
-/// Pick the top-N APs by total sample count (a proxy for stability).
-pub fn top_aps(by_ap: &HashMap<String, Vec<f64>>, n: usize) -> Vec<String> {
-    let mut aps: Vec<(&String, &Vec<f64>)> = by_ap.iter().collect();
-    aps.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
-    aps.into_iter().take(n).map(|(k, _)| k.clone()).collect()
 }
 
 #[cfg(test)]

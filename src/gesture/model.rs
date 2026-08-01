@@ -25,6 +25,9 @@ pub struct TrainedModel {
     pub labels: Vec<String>,
     /// Number of features per sample.
     pub feature_dim: usize,
+    /// Global AP order (strongest first) used to lay out feature blocks.
+    /// Inference must use this exact ordering.
+    pub ap_order: Vec<String>,
     /// RandomForest for the winning label.
     pub rf: RfModel,
     /// KNN for per-class probabilities (margin estimation).
@@ -44,7 +47,8 @@ impl TrainedModel {
     }
 
     /// Predict the label for a raw (un-normalized) feature vector.
-    /// Returns (label, margin) where margin = (best - second_best) / best.
+    /// Returns (label, margin) where margin = (prob[label] - max_other)/prob[label].
+    /// Margin is computed for the exact label returned, so RF and KNN stay consistent.
     pub fn predict(&self, raw_feature: &[f64]) -> Result<Option<(String, f64)>> {
         if raw_feature.len() != self.feature_dim {
             return Err(anyhow::anyhow!(
@@ -66,13 +70,24 @@ impl TrainedModel {
         let label = self.labels[label_idx].clone();
 
         let probs = self.knn.predict_proba(&x).context("KNN predict_proba failed")?;
+        let prob_vec = &probs[0];
 
-        let mut sorted: Vec<f64> = probs[0].clone();
-        sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
-        let best = sorted[0];
-        let second = if sorted.len() > 1 { sorted[1] } else { 0.0 };
+        // Margin is relative to the RF-chosen label. If KNN gives it zero
+        // probability (the models disagree), the margin collapses to ~0/negative
+        // and the confidence gate will reject — which is the safe behavior.
+        let p_label = prob_vec.get(label_idx).copied().unwrap_or(0.0);
+        let max_other = prob_vec
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != label_idx)
+            .map(|(_, p)| *p)
+            .fold(0.0f64, f64::max);
 
-        let margin = if best > 1e-9 { (best - second) / best } else { 0.0 };
+        let margin = if p_label > 1e-9 {
+            (p_label - max_other) / p_label
+        } else {
+            0.0
+        };
 
         Ok(Some((label, margin)))
     }
@@ -82,39 +97,58 @@ impl TrainedModel {
     }
 }
 
-/// Train RandomForest + KNN from feature rows + labels with an 80/20 split.
-/// Returns the model and logs held-out accuracy for both.
+/// Train RandomForest + KNN from feature rows + labels with a stratified
+/// 80/20 split. Returns the model and logs held-out accuracy for both.
 pub fn train(
     feature_rows: &[Vec<f64>],
     label_indices: &[u32],
     label_names: &[String],
+    ap_order: &[String],
 ) -> Result<TrainedModel> {
     if feature_rows.is_empty() {
         return Err(anyhow::anyhow!("no training data"));
     }
     let n = feature_rows.len();
     let dim = feature_rows[0].len();
-
-    let split = (n as f64 * 0.8) as usize;
-    if split == 0 || split == n {
+    if n < 5 {
         return Err(anyhow::anyhow!(
-            "not enough training samples for a train/test split (have {})",
+            "not enough training samples (have {}); record more",
             n
         ));
     }
 
-    let (x_train, x_test) = feature_rows.split_at(split);
-    let (y_train, y_test) = label_indices.split_at(split);
+    // Stratified split: for each class, hold out the last 20% as test.
+    let mut train_idx: Vec<usize> = Vec::new();
+    let mut test_idx: Vec<usize> = Vec::new();
+    for c in 0..label_names.len() {
+        let mut idxs: Vec<usize> = (0..n).filter(|&i| label_indices[i] as usize == c).collect();
+        let test_count = (idxs.len() as f64 * 0.2).round() as usize;
+        let split = idxs.len() - test_count.min(idxs.len());
+        let rest = idxs.split_off(split);
+        train_idx.extend(idxs);
+        test_idx.extend(rest);
+    }
+    if train_idx.is_empty() || test_idx.is_empty() {
+        return Err(anyhow::anyhow!(
+            "train/test split ended up empty (n={})",
+            n
+        ));
+    }
 
-    let (means, stds) = features::fit_zscore(x_train);
+    let x_train: Vec<Vec<f64>> = train_idx.iter().map(|&i| feature_rows[i].clone()).collect();
+    let y_train: Vec<u32> = train_idx.iter().map(|&i| label_indices[i]).collect();
+    let x_test: Vec<Vec<f64>> = test_idx.iter().map(|&i| feature_rows[i].clone()).collect();
+    let y_test: Vec<u32> = test_idx.iter().map(|&i| label_indices[i]).collect();
 
-    let mut xt = x_train.to_vec();
+    let (means, stds) = features::fit_zscore(&x_train);
+
+    let mut xt = x_train.clone();
     features::zscore_inplace(&mut xt, &means, &stds);
     let rows_train: Vec<&[f64]> = xt.iter().map(|r| r.as_slice()).collect();
     let xt_train =
         DenseMatrix::from_2d_array(&rows_train).map_err(|e| anyhow::anyhow!("matrix: {:?}", e))?;
 
-    let mut xte = x_test.to_vec();
+    let mut xte = x_test.clone();
     features::zscore_inplace(&mut xte, &means, &stds);
     let rows_test: Vec<&[f64]> = xte.iter().map(|r| r.as_slice()).collect();
     let xt_test =
@@ -126,18 +160,17 @@ pub fn train(
         .with_min_samples_leaf(1)
         .with_min_samples_split(2)
         .with_seed(42);
-    let rf = RandomForestClassifier::fit(&xt_train, &y_train.to_vec(), rf_params)
+    let rf = RandomForestClassifier::fit(&xt_train, &y_train, rf_params)
         .context("RandomForest fit failed")?;
 
     let knn_params = KNNClassifierParameters::default().with_k(3);
-    let knn = KNNClassifier::fit(&xt_train, &y_train.to_vec(), knn_params)
-        .context("KNN fit failed")?;
+    let knn = KNNClassifier::fit(&xt_train, &y_train, knn_params).context("KNN fit failed")?;
 
     let rf_pred = rf.predict(&xt_test).context("RF predict failed")?;
     let knn_pred = knn.predict(&xt_test).context("KNN predict failed")?;
 
-    let rf_acc = accuracy(&y_test.to_vec(), &rf_pred);
-    let knn_acc = accuracy(&y_test.to_vec(), &knn_pred);
+    let rf_acc = accuracy(&y_test, &rf_pred);
+    let knn_acc = accuracy(&y_test, &knn_pred);
 
     tracing::info!(
         "train={} test={} dim={} rf_acc={:.2} knn_acc={:.2}",
@@ -153,6 +186,7 @@ pub fn train(
         stds,
         labels: label_names.to_vec(),
         feature_dim: dim,
+        ap_order: ap_order.to_vec(),
         rf,
         knn,
     })
@@ -169,9 +203,26 @@ mod tests {
             .collect();
         let labels: Vec<u32> = (0..40).map(|i| if i < 20 { 0 } else { 1 }).collect();
         let names = vec!["a".to_string(), "b".to_string()];
+        let aps = vec!["AP1".to_string(), "AP2".to_string()];
 
-        let m = train(&rows, &labels, &names).unwrap();
+        let m = train(&rows, &labels, &names, &aps).unwrap();
         let out = m.predict(&vec![10.5, 1.0]).unwrap().unwrap();
+        assert_eq!(out.0, "b");
+    }
+
+    #[test]
+    fn model_serializes_and_roundtrips() {
+        let rows: Vec<Vec<f64>> = (0..40)
+            .map(|i| vec![if i < 20 { 0.0 } else { 10.0 }, 1.0])
+            .collect();
+        let labels: Vec<u32> = (0..40).map(|i| if i < 20 { 0 } else { 1 }).collect();
+        let names = vec!["a".to_string(), "b".to_string()];
+        let aps = vec!["AP1".to_string(), "AP2".to_string()];
+
+        let m = train(&rows, &labels, &names, &aps).unwrap();
+        let json = serde_json::to_string(&m).expect("serialize failed");
+        let m2: TrainedModel = serde_json::from_str(&json).expect("deserialize failed");
+        let out = m2.predict(&vec![10.5, 1.0]).unwrap().unwrap();
         assert_eq!(out.0, "b");
     }
 }
