@@ -3,3 +3,4 @@ radio_map.json
 gestures/
 gesture_model.json
 .env
+gesture_events.log

@@ -265,9 +265,15 @@ pub fn run() -> Result<()> {
                         if let Some(key) = inject::key_for_gesture(&label) {
                             match inject::emit_key(key) {
                                 Ok(()) => {
-                                    info!("EMIT {} -> key {}", label, key);
                                     last_emit = now;
                                     pending.clear(); // reset debounce after a real emit
+                                    let ts = crate::gesture::now_rfc3339();
+                                    let line = format!(
+                                        "{} gesture={} key={}",
+                                        ts, label, key
+                                    );
+                                    println!("[KEY] {}", line);
+                                    append_event_log(&line);
                                 }
                                 Err(e) => warn!("key emission failed: {}", e),
                             }
@@ -281,6 +287,26 @@ pub fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Append an emitted-command record to the persistent event log.
+fn append_event_log(line: &str) {
+    let path = "gesture_events.log";
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{}", line);
+    } else {
+        warn!("could not open {} for append", path);
+    }
+}
+
+/// RFC 3339 timestamp for the current time.
+pub fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 /// Given the last K predictions (with margin), decide a gesture using

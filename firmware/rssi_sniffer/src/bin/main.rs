@@ -98,10 +98,13 @@ fn on_sniff(pkt: PromiscuousPkt<'_>) {
 
     let mac: [u8; 6] = pkt.data[10..16].try_into().unwrap(); // addr2 = transmitter
     let ts_us = pkt.rx_cntl.timestamp.duration_since_epoch().as_micros();
+    // esp-radio exposes the raw RSSI byte as an unsigned i32; the ESP32 stores
+    // it as a signed value (e.g. 174 -> -82 dBm). Reinterpret as signed i8.
+    let rssi = (pkt.rx_cntl.rssi as u8) as i8;
     let sample = Sample {
         ts_us,
         mac,
-        rssi: pkt.rx_cntl.rssi,
+        rssi: rssi as i32,
     };
 
     critical_section::with(|cs| {
