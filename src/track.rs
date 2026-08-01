@@ -47,11 +47,11 @@ pub fn track_location(map_path: &str) -> Result<(), String> {
 
         match capture.next_packet() {
             Ok(packet) => {
-                if let Some((bssid, rssi)) = super::utils::extract_rssi_from_radiotap(&packet.data)
+                if let Some((bssid, rssi)) = super::utils::extract_rssi_from_radiotap(packet.data)
                 {
                     bssid_readings
                         .entry(bssid)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(rssi);
                 }
             }
@@ -79,7 +79,7 @@ pub fn track_location(map_path: &str) -> Result<(), String> {
         })
         .collect();
 
-    averaged_signals.sort_by(|a, b| b.1.cmp(&a.1));
+    averaged_signals.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     let current_signals: IndexMap<String, i8> = averaged_signals.into_iter().take(TOP_N).collect();
 

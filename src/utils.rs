@@ -10,16 +10,16 @@ pub fn extract_rssi_from_radiotap(packet: &[u8]) -> Option<(String, i8)> {
         Err(_) => return None,
     };
 
-    let rssi = match radiotap.antenna_signal {
-        Some(signal) => signal.value,
-        None => return None,
+    let rssi = {
+        let signal = radiotap.antenna_signal?;
+        signal.value
     };
 
     if !(-127..=0).contains(&rssi) {
         return None;
     }
 
-    let frame_start = radiotap.header.length as usize;
+    let frame_start = radiotap.header.length;
 
     if packet.len() < frame_start + 24 {
         return None;

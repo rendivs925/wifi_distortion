@@ -1,2 +1,5 @@
 /target
 radio_map.json
+gestures/
+gesture_model.json
+.env

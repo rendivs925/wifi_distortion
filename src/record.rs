@@ -48,18 +48,15 @@ pub fn record_fingerprint(label: &str) -> Result<IndexMap<String, i8>, String> {
             break;
         }
 
-        match capture.next_packet() {
-            Ok(packet) => {
-                packet_count += 1;
-                if let Some((bssid, rssi)) = super::utils::extract_rssi_from_radiotap(&packet.data)
-                {
-                    bssid_readings
-                        .entry(bssid)
-                        .or_insert_with(Vec::new)
-                        .push(rssi);
-                }
+        if let Ok(packet) = capture.next_packet() {
+            packet_count += 1;
+            if let Some((bssid, rssi)) = super::utils::extract_rssi_from_radiotap(packet.data)
+            {
+                bssid_readings
+                    .entry(bssid)
+                    .or_default()
+                    .push(rssi);
             }
-            Err(_) => {}
         }
 
         progress_bar.set_position(elapsed);
@@ -92,7 +89,7 @@ pub fn record_fingerprint(label: &str) -> Result<IndexMap<String, i8>, String> {
         })
         .collect();
 
-    averaged_signals.sort_by(|a, b| b.1.cmp(&a.1));
+    averaged_signals.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     let top_signals: IndexMap<String, i8> = averaged_signals.into_iter().take(TOP_N).collect();
 
@@ -107,10 +104,7 @@ pub fn save_fingerprint(
     signals: IndexMap<String, i8>,
     map_path: &str,
 ) -> Result<(), String> {
-    let mut radio_map = match super::fingerprint::RadioMap::load_from_file(map_path) {
-        Ok(map) => map,
-        Err(_) => super::fingerprint::RadioMap::new(),
-    };
+    let mut radio_map = super::fingerprint::RadioMap::load_from_file(map_path).unwrap_or_default();
 
     radio_map.add_fingerprint(label, signals);
     radio_map
